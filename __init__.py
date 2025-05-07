@@ -46,6 +46,25 @@ import ifcopenshell.api
 import bonsai.tool as tool
 from pprint import pprint
 
+# Add this after the imports section
+def register_properties():
+    bpy.types.Scene.ifc_graph_max_depth = bpy.props.IntProperty(
+        name="Max Recursion Depth",
+        description="Maximum depth for traversing IFC relationships",
+        default=2,
+        min=1,
+        max=10
+    )
+    bpy.types.Scene.ifc_graph_show_inverse = bpy.props.BoolProperty(
+        name="Show Inverse Relationships",
+        description="Show entities that reference the selected entity",
+        default=True
+    )
+
+def unregister_properties():
+    del bpy.types.Scene.ifc_graph_max_depth
+    del bpy.types.Scene.ifc_graph_show_inverse
+
 # --- Utility Functions ---
 
 def get_selected_ifc_class():
@@ -116,12 +135,62 @@ def build_ifc_hierarchy_graph(ifc_class_name):
 
     return graph
 
-def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1):
+def create_dot_node_label(entity):
+    """Create a DOT-compatible record-shaped label for an IFC entity"""
+    if not isinstance(entity, ifcopenshell.entity_instance):
+        return ""
+    
+    # Get entity info
+    entity_id = entity.id()
+    entity_type = entity.is_a()
+    entity_info = entity.get_info(False)
+    
+    # Create header for the record
+    header = f"#{entity_id} = {entity_type}"
+    
+    # Create attribute slots
+    slots = []
+    for attr_name, attr_value in entity_info.items():
+        # Format the attribute value based on its type
+        if attr_value is None:
+            formatted_value = "None"
+        elif isinstance(attr_value, ifcopenshell.entity_instance):
+            formatted_value = f"#{attr_value.id()} {attr_value.is_a()}"
+        elif isinstance(attr_value, (list, tuple)):
+            if len(attr_value) > 0 and isinstance(attr_value[0], ifcopenshell.entity_instance):
+                formatted_value = f"[{len(attr_value)} items]"
+            else:
+                formatted_value = str(attr_value)
+        else:
+            formatted_value = str(attr_value)
+            
+        # Truncate long values
+        if len(formatted_value) > 30:
+            formatted_value = formatted_value[:27] + "..."
+            
+        # Escape special characters for DOT
+        formatted_value = formatted_value.replace('"', '\\"').replace('|', '\\|').replace('{', '\\{').replace('}', '\\}')
+        attr_name = attr_name.replace('"', '\\"').replace('|', '\\|').replace('{', '\\{').replace('}', '\\}')
+        
+        # Add to slots with port name
+        slots.append(f"<{attr_name}> {attr_name}: {formatted_value}")
+    
+    # Combine into a record-style label
+    label = f"{{{header}|{{{' | '.join(slots)}}}}}"
+    
+    return label
+
+def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1, show_inverse=True):
     if blacklist is None:
-        blacklist = ['ObjectPlacement', 'PlacementRelTo', 'RelativePlacement', 'OwnerHistory']
+        # Get blacklist from preferences if available
+        try:
+            prefs = bpy.context.preferences.addons[__name__].preferences
+            blacklist = [item.strip() for item in prefs.blacklist_string.split(',')]
+        except (AttributeError, KeyError):
+            blacklist = ['ObjectPlacement', 'PlacementRelTo', 'RelativePlacement', 'OwnerHistory']
 
     graph = nx.DiGraph()
-    edge_labels={}
+    edge_labels = {}
     
     # Get the entity ID of the selected entity for highlighting
     selected_entity_id = ifc_entity.id()
@@ -133,7 +202,11 @@ def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1):
         entity_name = f"#{entity.id()} {entity.is_a()}"
         # Mark if this is the selected entity
         is_selected = (entity.id() == selected_entity_id)
-        graph.add_node(entity_name, label=entity_name, is_selected=is_selected)
+        
+        # Create a DOT-compatible record label
+        dot_label = create_dot_node_label(entity)
+        
+        graph.add_node(entity_name, label=dot_label, is_selected=is_selected)
         print(f"{entity_name}, depth={current_depth}")
         
         if current_depth > max_depth:
@@ -147,19 +220,19 @@ def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1):
             attr_value = getattr(entity, attr_name, None)
             if isinstance(attr_value, ifcopenshell.entity_instance):
                 related_entity_name = f"#{attr_value.id()} {attr_value.is_a()}"
-                el = graph.add_edge(entity_name, related_entity_name, label=attr_name)
-                edge_labels[el]=attr_name
+                graph.add_edge(entity_name, related_entity_name, label=attr_name)
+                edge_labels[(entity_name, related_entity_name)] = attr_name
                 add_entity_to_graph(attr_value, current_depth + 1)
             elif isinstance(attr_value, (list, tuple)):
                 for item in attr_value:
                     if isinstance(item, ifcopenshell.entity_instance):
                         related_entity_name = f"#{item.id()} {item.is_a()}"
-                        el= graph.add_edge(entity_name, related_entity_name, label=attr_name)
-                        edge_labels[el]=attr_name
+                        graph.add_edge(entity_name, related_entity_name, label=attr_name)
+                        edge_labels[(entity_name, related_entity_name)] = attr_name
                         add_entity_to_graph(item, current_depth + 1)
 
         # Inverse relationships using tool.Ifc.get().get_inverse() with a single attribute index
-        if current_depth != 0:
+        if current_depth != 0 or not show_inverse:
             return
                 
         inverse_relationships = tool.Ifc.get().get_inverse(entity, True, with_attribute_indices=True)
@@ -174,23 +247,22 @@ def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1):
                         print(f"Inverse relationship: {ref_entity_name} -> {entity_name}")            
                         # Lookup attribute name using the single index
                         inverse_attr_name = inverse_entity.attribute_name(inverse_attr_index)
-                        el = graph.add_edge(ref_entity_name, entity_name, label=f"(inverse) {inverse_attr_name}")
-                        edge_labels[el]=attr_name
-                        #just add this, go over maximum depth of 3 
+                        graph.add_edge(ref_entity_name, entity_name, label=f"(inverse) {inverse_attr_name}")
+                        edge_labels[(ref_entity_name, entity_name)] = f"(inverse) {inverse_attr_name}"
+                        # Just add this, go over maximum depth of 3 
                         add_entity_to_graph(inverse_entity, current_depth + 3)
 
     add_entity_to_graph(ifc_entity, 0)
     return graph, edge_labels
 
-import netgraph
-
 def draw_graph_to_image(graph, edge_labels, title="IFC Class Hierarchy", use_dot_layout=True):
-    temp_dir = tempfile.gettempdir()
-    png_path = os.path.join(temp_dir, "ifc_hierarchy_graph.png")
-    graphml_path = os.path.join(temp_dir, "ifc_hierarchy_graph.graphml")
-
-    # Save the graph as a GraphML file
-    # nx.write_graphml(graph, graphml_path)
+    # Get the directory of the current script
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    
+    # Define output paths in the script directory
+    png_path = os.path.join(script_dir, "ifc_hierarchy_graph.png")
+    dot_path = os.path.join(script_dir, "ifc_hierarchy_graph.dot")
+    
     default_dpi = plt.rcParams['figure.dpi']
 
     # Create a Matplotlib figure and axes
@@ -198,46 +270,101 @@ def draw_graph_to_image(graph, edge_labels, title="IFC Class Hierarchy", use_dot
     if use_dot_layout:
         # Use Graphviz's dot layout
         try:
-            # Create a pydot graph with box-shaped nodes
+            # Create a pydot graph
             pydot_graph = nx.nx_pydot.to_pydot(graph)
             
-            # Set node attributes: shape=box and add attributes to labels
+            # Set node attributes
             for node in pydot_graph.get_nodes():
                 node_name = node.get_name().strip('"')
                 if node_name in graph.nodes:
                     # Get node attributes
                     attrs = graph.nodes[node_name]
-                    # Create a label with node attributes
-                    label_parts = [node_name]
-                    for attr, value in attrs.items():
-                        if attr != 'label' and attr != 'is_selected':  # Avoid duplicating the label
-                            label_parts.append(f"{attr}: {value}")
                     
-                    # Set the new label and box shape
-                    node.set_label('"' + '\\n'.join(label_parts) + '"')
-                    node.set_shape('box')
-                    node.set_fontname('Arial-Bold')
+                    # Set label from the pre-formatted DOT record label
+                    if 'label' in attrs:
+                        node.set_label(attrs["label"])
+                    else:
+                        node.set_label(f'"{node_name}"')
+                    
+                    # Set node shape to record for structured display
+                    node.set_shape('record')
+                    node.set_fontname('Arial')
                     
                     # Set color to red if this is the selected node
                     if 'is_selected' in attrs and attrs['is_selected']:
                         node.set_color('red')
                         node.set_style('filled')
-                        node.set_fillcolor('red')
-                        node.set_fontcolor('white')
+                        node.set_fillcolor('lightpink')
+                        node.set_fontcolor('black')
+            
+            # Set edge attributes with proper ports for connecting to specific attributes
+            for edge in pydot_graph.get_edges():
+                source = edge.get_source().strip('"')
+                target = edge.get_destination().strip('"')
+                
+                # Get the edge label
+                edge_key = (source, target)
+                if edge_key in edge_labels:
+                    attr_name = edge_labels[edge_key]
+                    edge.set_label(f' {attr_name} ')
+                    
+                    # Connect from the specific attribute port if it's not an inverse relationship
+                    if not attr_name.startswith('(inverse)'):
+                        # Make sure attribute name is valid for a port ID (alphanumeric and underscore only)
+                        port_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in attr_name)
+                        edge.set_tailport(port_name)
             
             pydot_graph.set_rankdir("LR")
             pydot_graph.set_graph_defaults(size="30.83,30.83!", dpi="96")
             pydot_graph.set_graph_defaults(fontname="Arial", fontsize="14")
             pydot_graph.set("layout", "dot")
+            pydot_graph.set("concentrate", "true")  # Merge edges where possible
+            
+            # Save as DOT file in the script directory
+            print(f"Saving DOT file to: {dot_path}")
+            pydot_graph.write_raw(dot_path)
+            
+            # Generate PNG
             pydot_graph.write_png(png_path)
             
         except ImportError:
             print("Graphviz layout requested but pygraphviz or pydot is not installed.")
             pos = nx.spring_layout(graph)  # Fallback to spring layout
+        except Exception as e:
+            print(f"Error generating graph with pydot: {e}")
+            # Fallback to simple graph
+            try:
+                # Create a simpler pydot graph
+                pydot_graph = nx.nx_pydot.to_pydot(graph)
+                
+                for node in pydot_graph.get_nodes():
+                    node_name = node.get_name().strip('"')
+                    if node_name in graph.nodes:
+                        attrs = graph.nodes[node_name]
+                        node.set_label(f'"{node_name}"')
+                        node.set_shape('box')
+                        
+                        if 'is_selected' in attrs and attrs['is_selected']:
+                            node.set_color('red')
+                            node.set_style('filled')
+                            node.set_fillcolor('red')
+                            node.set_fontcolor('white')
+                
+                pydot_graph.set_rankdir("LR")
+                # Save the fallback DOT file
+                fallback_dot_path = os.path.join(script_dir, "ifc_hierarchy_graph_fallback.dot")
+                pydot_graph.write_raw(fallback_dot_path)
+                pydot_graph.write_png(png_path)
+            except Exception as e2:
+                print(f"Fallback graph generation also failed: {e2}")
+                pos = nx.spring_layout(graph)  # Fallback to spring layout
+                nx.draw(graph, pos, with_labels=True, arrows=True, node_size=2000, 
+                        node_color='lightblue', font_size=10, edge_color='gray')
+                plt.savefig(png_path)
+    else:
         # Use netgraph to draw the graph
         pos = nx.spring_layout(graph)  # Default layout
 
-    # Draw the graph using the selected layout
         # Create node color map based on selection status
         node_colors = []
         for node in graph.nodes():
@@ -277,10 +404,8 @@ def draw_graph_to_image(graph, edge_labels, title="IFC Class Hierarchy", use_dot
            edge_layout='curved'
        )
 
-
     plt.title(title)
     plt.axis('off')
-    #plt.savefig(png_path, bbox_inches='tight')
     plt.close()
 
     return png_path
@@ -335,8 +460,18 @@ class IFC_OT_GenerateAttributeGraph(bpy.types.Operator):
 
         ifc_entity = tool.Ifc.get().by_id(int(bpy.context.active_object.BIMObjectProperties.ifc_definition_id))
         blacklist = ['Representation', 'ObjectPlacement', 'PlacementRelTo', 'RelativePlacement', 'OwnerHistory']
-        max_depth = 5
-        graph, edge_labels = build_recursive_attribute_graph(ifc_entity, blacklist=blacklist, max_depth=max_depth)
+        
+        # Use the user-defined max depth from the UI
+        max_depth = context.scene.ifc_graph_max_depth
+        show_inverse = context.scene.ifc_graph_show_inverse
+        
+        graph, edge_labels = build_recursive_attribute_graph(
+            ifc_entity, 
+            blacklist=blacklist, 
+            max_depth=max_depth,
+            show_inverse=show_inverse
+        )
+        
         if len(graph.nodes) == 0:
             self.report({'ERROR'}, "Could not build attribute graph.")
             return {'CANCELLED'}
@@ -344,7 +479,7 @@ class IFC_OT_GenerateAttributeGraph(bpy.types.Operator):
         png_path = draw_graph_to_image(graph, edge_labels, title=f"Attributes of {ifc_class}")
         load_image_in_blender(png_path)
 
-        self.report({'INFO'}, f"Attribute graph generated for {ifc_class}")
+        self.report({'INFO'}, f"Attribute graph generated for {ifc_class} with depth {max_depth}")
         return {'FINISHED'}
 
 # --- Blender Panel ---
@@ -358,8 +493,22 @@ class IFC_PT_HierarchyPanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator("ifc.generate_hierarchy_graph", text="Show IFC Class Hierarchy")
-        layout.operator("ifc.generate_attribute_graph", text="Show Attribute Graph in Image")  # New button
+        
+        # Class hierarchy section
+        box = layout.box()
+        box.label(text="Class Hierarchy")
+        box.operator("ifc.generate_hierarchy_graph", text="Show IFC Class Hierarchy")
+        
+        # Attribute graph section
+        box = layout.box()
+        box.label(text="Attribute Graph")
+        
+        # Add recursion depth control
+        box.prop(context.scene, "ifc_graph_max_depth")
+        box.prop(context.scene, "ifc_graph_show_inverse")
+        
+        # Add the attribute graph button
+        box.operator("ifc.generate_attribute_graph", text="Show Attribute Graph")
 
 # --- Registration ---
 
@@ -370,12 +519,14 @@ classes = [
 ]
 
 def register():
+    register_properties()
     for cls in classes:
         bpy.utils.register_class(cls)
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    unregister_properties()
 
 if __name__ == "__main__":
     register()
