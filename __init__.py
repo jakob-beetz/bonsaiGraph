@@ -4,7 +4,7 @@ bl_info = {
     "version": (1, 1),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > IFC Hierarchy Tab",
-    "description": "Displays IFC class hierarchy (supertypes and subtypes) of selected object",
+    "description": "Displays IFC instance relations of selected object as a graph. \nPlease support Dion and the BonsaiBIM team by contributing to funding.",
     "category": "BIM",
 }
 
@@ -17,7 +17,12 @@ import subprocess
 import importlib
 
 # Fix Python path
-site_packages_path = os.path.expanduser('~') + "/AppData/Roaming/Python/Python311/site-packages"
+if sys.platform == "win32":
+    site_packages_path = os.path.expanduser('~') + "/AppData/Roaming/Python/Python311/site-packages"
+elif sys.platform == "darwin":
+    site_packages_path = os.path.expanduser('~') + "/Library/Python/3.11/lib/python/site-packages"
+else:  # Linux and other Unix-like
+    site_packages_path = os.path.expanduser('~') + "/.local/lib/python3.11/site-packages"
 if site_packages_path not in sys.path:
     sys.path.append(site_packages_path)
 
@@ -362,53 +367,6 @@ def draw_graph_to_image(graph, edge_labels, title="IFC Class Hierarchy", use_dot
                 nx.draw(graph, pos, with_labels=True, arrows=True, node_size=2000, 
                         node_color='lightblue', font_size=10, edge_color='gray')
                 plt.savefig(png_path)
-    else:
-        # Use netgraph to draw the graph
-        pos = nx.spring_layout(graph)  # Default layout
-
-        # Create node color map based on selection status
-        node_colors = []
-        for node in graph.nodes():
-            if graph.nodes[node].get('is_selected', False):
-                node_colors.append('red')
-            else:
-                node_colors.append('lightblue')
-                
-        nx.draw(graph, pos, with_labels=True, arrows=True, node_size=2000, 
-                node_color=node_colors, font_size=10, edge_color='gray')
-        ax = fig.add_subplot(111)
-        
-        # Create node color map for netgraph
-        node_color_dict = {}
-        for node in graph.nodes():
-            if graph.nodes[node].get('is_selected', False):
-                node_color_dict[node] = 'red'
-            else:
-                node_color_dict[node] = 'blue'
-        
-        # Use netgraph to draw the graph
-        plot_instance = netgraph.Graph(
-           graph,
-           node_layout='spring',
-           node_color=node_color_dict,
-           ax=ax,
-           arrows=True,
-           node_labels=True,
-           labels=True,
-           edge_labels=False,
-           # Increase font size and set color to black
-           label_kwargs={'fontsize': 10, 'color': 'white'},
-           node_label_fontdict=dict(size=9), 
-           # node_label_offset=0.0,
-           edge_label_kwargs={'fontsize': 10, 'color': 'black'},
-           node_layout_kwargs={'iterations': 50000},
-           edge_layout='curved'
-       )
-
-    plt.title(title)
-    plt.axis('off')
-    plt.close()
-
     return png_path
 
 def load_image_in_blender(png_path):
