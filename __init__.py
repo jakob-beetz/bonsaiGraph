@@ -250,7 +250,7 @@ def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1, sho
                         graph.add_edge(ref_entity_name, entity_name, label=f"(inverse) {inverse_attr_name}")
                         edge_labels[(ref_entity_name, entity_name)] = f"(inverse) {inverse_attr_name}"
                         # Just add this, go over maximum depth of 3 
-                        add_entity_to_graph(inverse_entity, current_depth + 3)
+                        add_entity_to_graph(inverse_entity, current_depth + 1)
 
     add_entity_to_graph(ifc_entity, 0)
     return graph, edge_labels
@@ -315,7 +315,8 @@ def draw_graph_to_image(graph, edge_labels, title="IFC Class Hierarchy", use_dot
                         edge.set_tailport(port_name)
             
             pydot_graph.set_rankdir("LR")
-            pydot_graph.set_graph_defaults(size="30.83,30.83!", dpi="96")
+            pydot_graph.set_graph_defaults(dpi="300")
+            # pydot_graph.set_graph_defaults(size="30.83,30.83!", dpi="96")
             pydot_graph.set_graph_defaults(fontname="Arial", fontsize="14")
             pydot_graph.set("layout", "dot")
             pydot_graph.set("concentrate", "true")  # Merge edges where possible
