@@ -65,10 +65,57 @@ def register_properties():
         description="Show entities that reference the selected entity",
         default=True
     )
+    
+    # New properties for blacklist and relationship toggles
+    bpy.types.Scene.ifc_graph_blacklist = bpy.props.StringProperty(
+        name="Blacklist Items",
+        description="List of attributes to exclude (one per line)",
+        default="ObjectPlacement\nPlacementRelTo\nRelativePlacement\nOwnerHistory",
+        subtype='NONE'  # This allows multiline editing in the UI
+    )
+    
+    # Toggle for specific relationship types
+    bpy.types.Scene.ifc_graph_show_containment = bpy.props.BoolProperty(
+        name="Show Containment",
+        description="Show IfcRelContainedInSpatialStructure relationships",
+        default=True
+    )
+    
+    bpy.types.Scene.ifc_graph_show_aggregates = bpy.props.BoolProperty(
+        name="Show Aggregates",
+        description="Show IfcRelAggregates relationships",
+        default=True
+    )
+    
+    bpy.types.Scene.ifc_graph_show_defines = bpy.props.BoolProperty(
+        name="Show Property Definitions",
+        description="Show IfcRelDefinesByProperties relationships",
+        default=True
+    )
+    
+    bpy.types.Scene.ifc_graph_show_material = bpy.props.BoolProperty(
+        name="Show Material",
+        description="Show material relationships",
+        default=True
+    )
+    
+    bpy.types.Scene.ifc_graph_show_type = bpy.props.BoolProperty(
+        name="Show Type Objects",
+        description="Show IfcRelDefinesByType relationships",
+        default=True
+    )
 
 def unregister_properties():
     del bpy.types.Scene.ifc_graph_max_depth
     del bpy.types.Scene.ifc_graph_show_inverse
+    
+    # Delete new properties
+    del bpy.types.Scene.ifc_graph_blacklist
+    del bpy.types.Scene.ifc_graph_show_containment
+    del bpy.types.Scene.ifc_graph_show_aggregates
+    del bpy.types.Scene.ifc_graph_show_defines
+    del bpy.types.Scene.ifc_graph_show_material
+    del bpy.types.Scene.ifc_graph_show_type
 
 # --- Utility Functions ---
 
@@ -185,20 +232,43 @@ def create_dot_node_label(entity):
     
     return label
 
-def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1, show_inverse=True):
-    if blacklist is None:
-        # Get blacklist from preferences if available
-        try:
-            prefs = bpy.context.preferences.addons[__name__].preferences
-            blacklist = [item.strip() for item in prefs.blacklist_string.split(',')]
-        except (AttributeError, KeyError):
-            blacklist = ['ObjectPlacement', 'PlacementRelTo', 'RelativePlacement', 'OwnerHistory']
-
+def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1, show_inverse=True, 
+                                    show_containment=True, show_aggregates=True, show_defines=True,
+                                    show_material=True, show_type=True):
+        # Get blacklist from scene settings, splitting by newlines instead of commas
+    try:
+        blacklist = [item.strip() for item in bpy.context.scene.ifc_graph_blacklist.split(',')]
+        print(f"Blacklist: {blacklist}")
+    except (AttributeError, KeyError):
+        fallback_blacklist = ['ObjectPlacement', 'PlacementRelTo', 'RelativePlacement', 'OwnerHistory']
+        print(f"Could not read user blacklist : {blacklist}, using {fallback_blacklist}")
+        blacklist = fallback_blacklist
     graph = nx.DiGraph()
     edge_labels = {}
     
     # Get the entity ID of the selected entity for highlighting
     selected_entity_id = ifc_entity.id()
+    
+    def should_show_relationship(entity, attr_name):
+        """Determine if a relationship should be shown based on user settings"""
+        if not isinstance(entity, ifcopenshell.entity_instance):
+            return True
+            
+        entity_type = entity.is_a()
+        
+        # Check relationship type toggles
+        if entity_type == "IfcRelContainedInSpatialStructure" and not show_containment:
+            return False
+        if entity_type == "IfcRelAggregates" and not show_aggregates:
+            return False
+        if entity_type == "IfcRelDefinesByProperties" and not show_defines:
+            return False
+        if entity_type == "IfcRelDefinesByType" and not show_type:
+            return False
+        if entity_type in ["IfcRelAssociatesMaterial", "IfcMaterial", "IfcMaterialLayerSet"] and not show_material:
+            return False
+            
+        return True
     
     def add_entity_to_graph(entity, current_depth):
         if entity is None or not isinstance(entity, ifcopenshell.entity_instance):
@@ -212,7 +282,7 @@ def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1, sho
         dot_label = create_dot_node_label(entity)
         
         graph.add_node(entity_name, label=dot_label, is_selected=is_selected)
-        print(f"{entity_name}, depth={current_depth}")
+        # print(f"{entity_name}, depth={current_depth}")
         
         if current_depth > max_depth:
             return
@@ -224,17 +294,19 @@ def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1, sho
 
             attr_value = getattr(entity, attr_name, None)
             if isinstance(attr_value, ifcopenshell.entity_instance):
-                related_entity_name = f"#{attr_value.id()} {attr_value.is_a()}"
-                graph.add_edge(entity_name, related_entity_name, label=attr_name)
-                edge_labels[(entity_name, related_entity_name)] = attr_name
-                add_entity_to_graph(attr_value, current_depth + 1)
+                if should_show_relationship(attr_value, attr_name):
+                    related_entity_name = f"#{attr_value.id()} {attr_value.is_a()}"
+                    graph.add_edge(entity_name, related_entity_name, label=attr_name)
+                    edge_labels[(entity_name, related_entity_name)] = attr_name
+                    add_entity_to_graph(attr_value, current_depth + 1)
             elif isinstance(attr_value, (list, tuple)):
                 for item in attr_value:
                     if isinstance(item, ifcopenshell.entity_instance):
-                        related_entity_name = f"#{item.id()} {item.is_a()}"
-                        graph.add_edge(entity_name, related_entity_name, label=attr_name)
-                        edge_labels[(entity_name, related_entity_name)] = attr_name
-                        add_entity_to_graph(item, current_depth + 1)
+                        if should_show_relationship(item, attr_name):
+                            related_entity_name = f"#{item.id()} {item.is_a()}"
+                            graph.add_edge(entity_name, related_entity_name, label=attr_name)
+                            edge_labels[(entity_name, related_entity_name)] = attr_name
+                            add_entity_to_graph(item, current_depth + 1)
 
         # Inverse relationships using tool.Ifc.get().get_inverse() with a single attribute index
         if current_depth != 0 or not show_inverse:
@@ -248,14 +320,15 @@ def build_recursive_attribute_graph(ifc_entity, blacklist=None, max_depth=1, sho
                 if len(inverse_rel) == 2:
                     inverse_entity, inverse_attr_index = inverse_rel
                     if isinstance(inverse_entity, ifcopenshell.entity_instance) and not (entity.is_a() == "IfcOwnerHistory"):
-                        ref_entity_name = f"#{inverse_entity.id()} {inverse_entity.is_a()}"
-                        print(f"Inverse relationship: {ref_entity_name} -> {entity_name}")            
-                        # Lookup attribute name using the single index
-                        inverse_attr_name = inverse_entity.attribute_name(inverse_attr_index)
-                        graph.add_edge(ref_entity_name, entity_name, label=f"(inverse) {inverse_attr_name}")
-                        edge_labels[(ref_entity_name, entity_name)] = f"(inverse) {inverse_attr_name}"
-                        # Just add this, go over maximum depth of 3 
-                        add_entity_to_graph(inverse_entity, current_depth + 1)
+                        if should_show_relationship(inverse_entity, None):
+                            ref_entity_name = f"#{inverse_entity.id()} {inverse_entity.is_a()}"
+                            print(f"Inverse relationship: {ref_entity_name} -> {entity_name}")            
+                            # Lookup attribute name using the single index
+                            inverse_attr_name = inverse_entity.attribute_name(inverse_attr_index)
+                            graph.add_edge(ref_entity_name, entity_name, label=f"(inverse) {inverse_attr_name}")
+                            edge_labels[(ref_entity_name, entity_name)] = f"(inverse) {inverse_attr_name}"
+                            # Just add this, go over maximum depth of 3 
+                            add_entity_to_graph(inverse_entity, current_depth + 1)
 
     add_entity_to_graph(ifc_entity, 0)
     return graph, edge_labels
@@ -418,17 +491,29 @@ class IFC_OT_GenerateAttributeGraph(bpy.types.Operator):
             return {'CANCELLED'}
 
         ifc_entity = tool.Ifc.get().by_id(int(bpy.context.active_object.BIMObjectProperties.ifc_definition_id))
-        blacklist = ['Representation', 'ObjectPlacement', 'PlacementRelTo', 'RelativePlacement', 'OwnerHistory']
         
-        # Use the user-defined max depth from the UI
+        # Get blacklist from user input, splitting by newlines
+        blacklist = [item.strip() for item in context.scene.ifc_graph_blacklist.split('\n') if item.strip()]
+        
+        # Use the user-defined settings from the UI
         max_depth = context.scene.ifc_graph_max_depth
         show_inverse = context.scene.ifc_graph_show_inverse
+        show_containment = context.scene.ifc_graph_show_containment
+        show_aggregates = context.scene.ifc_graph_show_aggregates
+        show_defines = context.scene.ifc_graph_show_defines
+        show_material = context.scene.ifc_graph_show_material
+        show_type = context.scene.ifc_graph_show_type
         
         graph, edge_labels = build_recursive_attribute_graph(
             ifc_entity, 
             blacklist=blacklist, 
             max_depth=max_depth,
-            show_inverse=show_inverse
+            show_inverse=show_inverse,
+            show_containment=show_containment,
+            show_aggregates=show_aggregates,
+            show_defines=show_defines,
+            show_material=show_material,
+            show_type=show_type
         )
         
         if len(graph.nodes) == 0:
@@ -465,6 +550,20 @@ class IFC_PT_HierarchyPanel(bpy.types.Panel):
         # Add recursion depth control
         box.prop(context.scene, "ifc_graph_max_depth")
         box.prop(context.scene, "ifc_graph_show_inverse")
+        
+        # Add blacklist input as a multiline text field
+        box.label(text="Attributes to Exclude:")
+        box.prop(context.scene, "ifc_graph_blacklist", text="")
+        
+        # Add relationship toggles in a sub-box
+        rel_box = box.box()
+        rel_box.label(text="Relationship Types to Show:")
+        col = rel_box.column(align=True)
+        col.prop(context.scene, "ifc_graph_show_containment")
+        col.prop(context.scene, "ifc_graph_show_aggregates")
+        col.prop(context.scene, "ifc_graph_show_defines")
+        col.prop(context.scene, "ifc_graph_show_material")
+        col.prop(context.scene, "ifc_graph_show_type")
         
         # Add the attribute graph button
         box.operator("ifc.generate_attribute_graph", text="Show Attribute Graph")
