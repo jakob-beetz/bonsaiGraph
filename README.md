@@ -33,4 +33,6 @@ Please support [Dion](https://github.com/Moult) and [athoms](https://github.com/
 ## License
 LGPL 3
 
-Meant for education as an ![OER Logo](img/Global_Open_Educational_Resources_Logo.svg) [OER](https://en.wikipedia.org/wiki/Open_educational_resources)
+Meant for education as an  [OER](https://en.wikipedia.org/wiki/Open_educational_resources)
+![OER Logo](img/Global_Open_Educational_Resources_Logo.svg)
+<img src="img/Global_Open_Educational_Resources_Logo.svg" alt="OER Logo" width="100"/>
